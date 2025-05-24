@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Gravador por Som com Pasta - Multiplos Arquivos</title>
+</head>
+<body>
+  <h1>Gravador por Som com Escolha de Pasta</h1>
+  <p id="status">Inicializando...</p>
+  <button id="chooseDirBtn">Escolher pasta para salvar</button>
+
+  <script>
+    const statusElem = document.getElementById('status');
+    const chooseDirBtn = document.getElementById('chooseDirBtn');
+
+    let dirHandle = null;
+    let mediaRecorder = null;
+    let isRecording = false;
+    let silenceTimeout = null;
+    const SILENCE_DELAY = 2000; // 2 segundos
+    let chunks = [];
+    let stream = null;
+
+    chooseDirBtn.onclick = async () => {
+      try {
+        dirHandle = await window.showDirectoryPicker();
+        statusElem.textContent = 'Pasta selecionada. Solicitando permissão para microfone...';
+        chooseDirBtn.disabled = true;
+        await init();
+      } catch (e) {
+        statusElem.textContent = 'Seleção de pasta cancelada ou falhou.';
+        console.error(e);
+      }
+    };
+
+    async function init() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        statusElem.textContent = 'Microfone não suportado neste navegador.';
+        return;
+      }
+
+      try {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        statusElem.textContent = 'Permissão concedida. Pronto para gravar ao detectar som.';
+        startListening(stream);
+      } catch (err) {
+        statusElem.textContent = 'Permissão negada ou erro: ' + err.message;
+      }
+    }
+
+    function startNewRecording() {
+      chunks = [];
+      mediaRecorder = new MediaRecorder(stream);
+
+      mediaRecorder.ondataavailable = e => chunks.push(e.data);
+      mediaRecorder.onstop = async () => {
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        chunks = [];
+        if (dirHandle) {
+          const nomeArquivo = `gravacao_${Date.now()}.webm`;
+          await salvarArquivo(nomeArquivo, blob);
+        } else {
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `gravacao_${Date.now()}.webm`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          statusElem.textContent = 'Arquivo salvo via download.';
+        }
+      };
+
+      mediaRecorder.start();
+      isRecording = true;
+      statusElem.textContent = '⚠️ Gravando...';
+      console.log('Gravando...');
+    }
+
+    function startListening(stream) {
+      const audioContext = new AudioContext();
+      const source = audioContext.createMediaStreamSource(stream);
+      const processor = audioContext.createScriptProcessor(4096, 1, 1);
+
+      source.connect(processor);
+      processor.connect(audioContext.destination);
+
+      processor.onaudioprocess = e => {
+        const inputData = e.inputBuffer.getChannelData(0);
+        let maxVolume = 0;
+        for (let i = 0; i < inputData.length; i++) {
+          const volume = Math.abs(inputData[i]);
+          if (volume > maxVolume) maxVolume = volume;
+        }
+
+        if (maxVolume > 0.1) {
+          if (!isRecording) {
+            startNewRecording();
+          }
+          if (silenceTimeout) {
+            clearTimeout(silenceTimeout);
+            silenceTimeout = null;
+          }
+        } else {
+          if (isRecording && !silenceTimeout) {
+            silenceTimeout = setTimeout(() => {
+              mediaRecorder.stop();
+              isRecording = false;
+              statusElem.textContent = 'Parou de gravar.';
+              console.log('Parou de gravar.');
+              silenceTimeout = null;
+            }, SILENCE_DELAY);
+          }
+        }
+      };
+    }
+
+    async function salvarArquivo(nomeArquivo, blob) {
+      try {
+        const fileHandle = await dirHandle.getFileHandle(nomeArquivo, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        statusElem.textContent = `Arquivo ${nomeArquivo} salvo na pasta.`;
+      } catch (e) {
+        statusElem.textContent = 'Erro ao salvar arquivo: ' + e.message;
+        console.error(e);
+      }
+    }
+  </script>
+</body>
+</html>
