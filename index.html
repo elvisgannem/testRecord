@@ -3,53 +3,79 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Gravador por Som com Pasta - Multiplos Arquivos</title>
+<title>Gravador com IndexedDB</title>
 </head>
 <body>
-  <h1>Gravador por Som com Escolha de Pasta</h1>
+  <h1>Gravador Automático com IndexedDB</h1>
   <p id="status">Inicializando...</p>
-  <button id="chooseDirBtn">Escolher pasta para salvar</button>
+  <button id="downloadAllBtn" disabled>Baixar todos os áudios</button>
 
   <script>
     const statusElem = document.getElementById('status');
-    const chooseDirBtn = document.getElementById('chooseDirBtn');
+    const downloadAllBtn = document.getElementById('downloadAllBtn');
 
-    let dirHandle = null;
     let mediaRecorder = null;
     let isRecording = false;
     let silenceTimeout = null;
     const SILENCE_DELAY = 2000; // 2 segundos
     let chunks = [];
-    let stream = null;
 
-    chooseDirBtn.onclick = async () => {
-      try {
-        dirHandle = await window.showDirectoryPicker();
-        statusElem.textContent = 'Pasta selecionada. Solicitando permissão para microfone...';
-        chooseDirBtn.disabled = true;
-        await init();
-      } catch (e) {
-        statusElem.textContent = 'Seleção de pasta cancelada ou falhou.';
-        console.error(e);
-      }
-    };
+    // IndexedDB setup
+    const dbName = 'AudioDB';
+    const storeName = 'audios';
+    let db;
+
+    function openDB() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(dbName, 1);
+        request.onerror = e => reject(e.target.error);
+        request.onsuccess = e => {
+          db = e.target.result;
+          resolve(db);
+        };
+        request.onupgradeneeded = e => {
+          const db = e.target.result;
+          if (!db.objectStoreNames.contains(storeName)) {
+            db.createObjectStore(storeName, { keyPath: 'id', autoIncrement: true });
+          }
+        };
+      });
+    }
+
+    function saveAudio(blob) {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readwrite');
+        const store = tx.objectStore(storeName);
+        store.add({ blob, timestamp: Date.now() });
+        tx.oncomplete = () => resolve();
+        tx.onerror = e => reject(e.target.error);
+      });
+    }
+
+    async function getAllAudios() {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(storeName, 'readonly');
+        const store = tx.objectStore(storeName);
+        const request = store.getAll();
+        request.onsuccess = e => resolve(e.target.result);
+        request.onerror = e => reject(e.target.error);
+      });
+    }
 
     async function init() {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        statusElem.textContent = 'Microfone não suportado neste navegador.';
-        return;
-      }
-
       try {
-        stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-        statusElem.textContent = 'Permissão concedida. Pronto para gravar ao detectar som.';
+        await openDB();
+        statusElem.textContent = 'Banco de dados aberto. Solicitando permissão para microfone...';
+
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        statusElem.textContent = 'Permissão concedida. Gravando ao detectar som.';
         startListening(stream);
-      } catch (err) {
-        statusElem.textContent = 'Permissão negada ou erro: ' + err.message;
+      } catch (e) {
+        statusElem.textContent = 'Erro ou permissão negada: ' + e.message;
       }
     }
 
-    function startNewRecording() {
+    function startNewRecording(stream) {
       chunks = [];
       mediaRecorder = new MediaRecorder(stream);
 
@@ -57,25 +83,14 @@
       mediaRecorder.onstop = async () => {
         const blob = new Blob(chunks, { type: 'audio/webm' });
         chunks = [];
-        if (dirHandle) {
-          const nomeArquivo = `gravacao_${Date.now()}.webm`;
-          await salvarArquivo(nomeArquivo, blob);
-        } else {
-          const url = URL.createObjectURL(blob);
-          const a = document.createElement('a');
-          a.href = url;
-          a.download = `gravacao_${Date.now()}.webm`;
-          document.body.appendChild(a);
-          a.click();
-          a.remove();
-          statusElem.textContent = 'Arquivo salvo via download.';
-        }
+        await saveAudio(blob);
+        statusElem.textContent = 'Gravação salva localmente.';
+        downloadAllBtn.disabled = false;
       };
 
       mediaRecorder.start();
       isRecording = true;
       statusElem.textContent = '⚠️ Gravando...';
-      console.log('Gravando...');
     }
 
     function startListening(stream) {
@@ -96,7 +111,7 @@
 
         if (maxVolume > 0.1) {
           if (!isRecording) {
-            startNewRecording();
+            startNewRecording(stream);
           }
           if (silenceTimeout) {
             clearTimeout(silenceTimeout);
@@ -107,8 +122,7 @@
             silenceTimeout = setTimeout(() => {
               mediaRecorder.stop();
               isRecording = false;
-              statusElem.textContent = 'Parou de gravar.';
-              console.log('Parou de gravar.');
+              statusElem.textContent = 'Parou de gravar. Esperando novo som...';
               silenceTimeout = null;
             }, SILENCE_DELAY);
           }
@@ -116,18 +130,27 @@
       };
     }
 
-    async function salvarArquivo(nomeArquivo, blob) {
-      try {
-        const fileHandle = await dirHandle.getFileHandle(nomeArquivo, { create: true });
-        const writable = await fileHandle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-        statusElem.textContent = `Arquivo ${nomeArquivo} salvo na pasta.`;
-      } catch (e) {
-        statusElem.textContent = 'Erro ao salvar arquivo: ' + e.message;
-        console.error(e);
+    downloadAllBtn.onclick = async () => {
+      const audios = await getAllAudios();
+      if (!audios.length) {
+        alert('Nenhum áudio salvo.');
+        return;
       }
-    }
+      audios.forEach(({ blob, timestamp }, index) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `gravacao_${timestamp}.webm`;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+      });
+      statusElem.textContent = 'Todos os áudios foram baixados.';
+    };
+
+    window.onload = () => {
+      init();
+    };
   </script>
 </body>
 </html>
